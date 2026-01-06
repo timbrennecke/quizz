@@ -18,9 +18,17 @@ export const supabase = createClient(
       params: {
         eventsPerSecond: 10
       }
+    },
+    auth: {
+      persistSession: false
     }
   }
 )
+
+// Debug: Log Supabase configuration on client side
+if (typeof window !== 'undefined') {
+  console.log('Supabase initialized with URL:', supabaseUrl?.substring(0, 30) + '...')
+}
 
 // Generate a random 6-character alphanumeric code
 export function generateSessionCode(): string {
