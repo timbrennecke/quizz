@@ -62,13 +62,22 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
 
       // Start polling for game state changes
       const poller = createSessionPoller(sessionCode)
+      console.log('Questions loaded:', questions.length, questions.map(q => q.text))
+
       poller
         .setOnStatusChange(async (session: GameSession) => {
-          console.log('Session status changed:', session.status, 'current phase:', phaseRef.current)
+          console.log('=== STATUS CHANGE CALLBACK ===')
+          console.log('Session status:', session.status)
+          console.log('Current phase:', phaseRef.current)
+          console.log('Current question in session:', session.current_question)
+          console.log('Questions array length:', questions.length)
+          
           if (session.status === 'in_progress' && phaseRef.current === 'lobby') {
+            console.log('Game is starting! Showing question...')
             // Game started - fetch current question
             if (session.current_question >= 0 && session.current_question < questions.length) {
               const q = questions[session.current_question]
+              console.log('Question to show:', q.text)
               const { correct_answer, ...questionWithoutAnswer } = q
               setCurrentQuestion(questionWithoutAnswer)
               setQuestionNumber(session.current_question + 1)
@@ -78,6 +87,9 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
               lastQuestionIndexRef.current = session.current_question
               setPhase('question')
               phaseRef.current = 'question'
+              console.log('Phase set to question')
+            } else {
+              console.log('Question index out of range:', session.current_question)
             }
           } else if (session.status === 'finished' && phaseRef.current !== 'finished') {
             // Fetch final scores

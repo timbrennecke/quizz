@@ -64,23 +64,41 @@ export class SessionPoller {
         .order('score', { referencedTable: 'players', ascending: false })
         .single()
 
-      if (error || !session) return
+      if (error) {
+        console.error('Polling fetch error:', error)
+        return
+      }
+      
+      if (!session) {
+        console.error('No session found')
+        return
+      }
+
+      console.log('Poll result:', {
+        status: session.status,
+        current_question: session.current_question,
+        lastStatus: this.lastStatus,
+        lastQuestionIndex: this.lastQuestionIndex
+      })
 
       // Check for player changes
       const players = session.players || []
       if (players.length !== this.lastPlayerCount) {
+        console.log('Players changed:', players.length)
         this.lastPlayerCount = players.length
         this.onPlayersChange?.(players)
       }
 
       // Check for status changes
       if (session.status !== this.lastStatus) {
+        console.log('Status changed from', this.lastStatus, 'to', session.status)
         this.lastStatus = session.status
         this.onStatusChange?.(session)
       }
 
       // Check for question changes (only when game is in progress)
       if (session.status === 'in_progress' && session.current_question !== this.lastQuestionIndex) {
+        console.log('Question changed from', this.lastQuestionIndex, 'to', session.current_question)
         this.lastQuestionIndex = session.current_question
         this.onQuestionChange?.(session.current_question)
       }
