@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback, use } from 'react'
+import { useState, useEffect, useCallback, useRef, use } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { GameSession, Player, Question } from '@/types/quiz'
 import { createQuizChannel, QuizChannel } from '@/lib/realtime'
+import { createSessionPoller, SessionPoller } from '@/lib/polling'
 import Scoreboard from '@/components/Scoreboard'
 import Timer from '@/components/Timer'
 
@@ -23,6 +24,7 @@ export default function HostPlayPage({ params }: { params: Promise<{ sessionId: 
   const [answeredCount, setAnsweredCount] = useState(0)
   const [channel, setChannel] = useState<QuizChannel | null>(null)
   const [loading, setLoading] = useState(true)
+  const pollerRef = useRef<SessionPoller | null>(null)
 
   const currentQuestion = questions[currentQuestionIndex]
 
@@ -52,10 +54,20 @@ export default function HostPlayPage({ params }: { params: Promise<{ sessionId: 
     }
   }, [sessionCode, router])
 
-  // Setup realtime channel
+  // Setup realtime channel + polling fallback
   useEffect(() => {
     if (!sessionCode) return
 
+    // Start polling as reliable fallback
+    const poller = createSessionPoller(sessionCode)
+    poller
+      .setOnPlayersChange((newPlayers) => {
+        setPlayers(newPlayers)
+      })
+    poller.start(2000) // Poll every 2 seconds
+    pollerRef.current = poller
+
+    // Also try realtime (for faster updates when it works)
     const quizChannel = createQuizChannel(sessionCode)
     
     quizChannel
@@ -71,103 +83,136 @@ export default function HostPlayPage({ params }: { params: Promise<{ sessionId: 
 
     quizChannel.subscribe().then(() => {
       setChannel(quizChannel)
+    }).catch(() => {
+      console.log('Realtime failed, using polling only')
     })
 
     return () => {
       quizChannel.unsubscribe()
+      poller.stop()
     }
   }, [sessionCode])
 
   // Start the game
   const startGame = useCallback(async () => {
-    if (!channel || players.length === 0) return
+    if (players.length === 0) return
 
+    // Update database - this triggers polling updates for players
     await fetch(`/api/sessions/${sessionCode}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'in_progress' }),
+      body: JSON.stringify({ status: 'in_progress', current_question: 0 }),
     })
 
-    await channel.broadcastGameStarted()
+    // Try realtime broadcast (may not work, but polling will catch it)
+    if (channel) {
+      try {
+        await channel.broadcastGameStarted()
+        if (questions[0]) {
+          const { correct_answer, ...questionWithoutAnswer } = questions[0]
+          await channel.broadcastNewQuestion({
+            question: questionWithoutAnswer,
+            questionNumber: 1,
+            totalQuestions: questions.length,
+            startTime: Date.now(),
+          })
+        }
+      } catch (e) {
+        console.log('Broadcast failed, players will get update via polling')
+      }
+    }
+
     setPhase('question')
     setCurrentQuestionIndex(0)
     setAnsweredCount(0)
-
-    // Send first question
-    if (questions[0]) {
-      const { correct_answer, ...questionWithoutAnswer } = questions[0]
-      await channel.broadcastNewQuestion({
-        question: questionWithoutAnswer,
-        questionNumber: 1,
-        totalQuestions: questions.length,
-        startTime: Date.now(),
-      })
-    }
   }, [channel, players.length, questions, sessionCode])
 
   // Show results for current question
   const showResults = useCallback(async () => {
-    if (!channel || !currentQuestion) return
+    if (!currentQuestion) return
 
     // Fetch updated player scores
     const res = await fetch(`/api/sessions/${sessionCode}`)
     const data = await res.json()
     setPlayers(data.players || [])
 
-    const scores = (data.players || []).map((p: Player) => ({
-      playerId: p.id,
-      nickname: p.nickname,
-      score: p.score,
-      pointsEarned: 0, // Would need to calculate from answers
-    }))
-
-    await channel.broadcastQuestionResults({
-      correctAnswer: currentQuestion.correct_answer,
-      scores,
-    })
+    // Try realtime broadcast
+    if (channel) {
+      try {
+        const scores = (data.players || []).map((p: Player) => ({
+          playerId: p.id,
+          nickname: p.nickname,
+          score: p.score,
+          pointsEarned: 0,
+        }))
+        await channel.broadcastQuestionResults({
+          correctAnswer: currentQuestion.correct_answer,
+          scores,
+        })
+      } catch (e) {
+        console.log('Broadcast failed')
+      }
+    }
 
     setPhase('results')
   }, [channel, currentQuestion, sessionCode])
 
   // Move to next question
   const nextQuestion = useCallback(async () => {
-    if (!channel) return
-
     const nextIndex = currentQuestionIndex + 1
 
     if (nextIndex >= questions.length) {
-      // Game finished
-      const finalScores = players
-        .sort((a, b) => b.score - a.score)
-        .map((p, i) => ({
-          playerId: p.id,
-          nickname: p.nickname,
-          score: p.score,
-          rank: i + 1,
-        }))
-
-      await channel.broadcastGameFinished({ finalScores })
-      
+      // Game finished - update database
       await fetch(`/api/sessions/${sessionCode}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'finished' }),
       })
 
+      // Try realtime broadcast
+      if (channel) {
+        try {
+          const finalScores = players
+            .sort((a, b) => b.score - a.score)
+            .map((p, i) => ({
+              playerId: p.id,
+              nickname: p.nickname,
+              score: p.score,
+              rank: i + 1,
+            }))
+          await channel.broadcastGameFinished({ finalScores })
+        } catch (e) {
+          console.log('Broadcast failed, players will get update via polling')
+        }
+      }
+
       setPhase('finished')
     } else {
-      // Next question
+      // Update database with new question index - triggers polling for players
+      await fetch(`/api/sessions/${sessionCode}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_question: nextIndex }),
+      })
+
       setCurrentQuestionIndex(nextIndex)
       setAnsweredCount(0)
       setPhase('question')
 
-      const { correct_answer, ...questionWithoutAnswer } = questions[nextIndex]
-      await channel.broadcastNewQuestion({
-        question: questionWithoutAnswer,
-        questionNumber: nextIndex + 1,
-        totalQuestions: questions.length,
-        startTime: Date.now(),
-      })
+      // Try realtime broadcast
+      if (channel) {
+        try {
+          const { correct_answer, ...questionWithoutAnswer } = questions[nextIndex]
+          await channel.broadcastNewQuestion({
+            question: questionWithoutAnswer,
+            questionNumber: nextIndex + 1,
+            totalQuestions: questions.length,
+            startTime: Date.now(),
+          })
+        } catch (e) {
+          console.log('Broadcast failed, players will get update via polling')
+        }
+      }
     }
   }, [channel, currentQuestionIndex, questions, players, sessionCode])
 

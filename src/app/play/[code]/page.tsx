@@ -1,9 +1,11 @@
 'use client'
 
-import { useState, useEffect, useCallback, use } from 'react'
+import { useState, useEffect, useCallback, useRef, use } from 'react'
 import { useRouter } from 'next/navigation'
-import { Player, Question } from '@/types/quiz'
+import { Player, Question, GameSession } from '@/types/quiz'
 import { createQuizChannel, QuizChannel } from '@/lib/realtime'
+import { createSessionPoller, SessionPoller } from '@/lib/polling'
+import { supabase } from '@/lib/supabase'
 import JoinScreen from '@/components/JoinScreen'
 import QuestionDisplay from '@/components/QuestionDisplay'
 import Scoreboard from '@/components/Scoreboard'
@@ -29,6 +31,8 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
   const [channel, setChannel] = useState<QuizChannel | null>(null)
   const [error, setError] = useState('')
   const [finalScores, setFinalScores] = useState<{ nickname: string; score: number; rank: number }[]>([])
+  const pollerRef = useRef<SessionPoller | null>(null)
+  const lastQuestionIndexRef = useRef<number>(-1)
 
   // Join the game
   const handleJoin = useCallback(async (nickname: string) => {
@@ -47,7 +51,68 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
       const playerData = await res.json()
       setPlayer(playerData)
 
-      // Setup realtime channel
+      // Fetch session to get questions
+      const sessionRes = await fetch(`/api/sessions/${sessionCode}`)
+      const sessionData = await sessionRes.json()
+      const questions = sessionData.quiz?.questions || []
+      setTotalQuestions(questions.length)
+
+      // Start polling for game state changes
+      const poller = createSessionPoller(sessionCode)
+      poller
+        .setOnStatusChange(async (session: GameSession) => {
+          console.log('Session status changed:', session.status)
+          if (session.status === 'in_progress' && phase === 'lobby') {
+            // Game started - fetch current question
+            await fetchCurrentQuestion(session.current_question, questions)
+          } else if (session.status === 'finished') {
+            // Fetch final scores
+            const finalRes = await fetch(`/api/sessions/${sessionCode}`)
+            const finalData = await finalRes.json()
+            const sortedPlayers = (finalData.players || [])
+              .sort((a: Player, b: Player) => b.score - a.score)
+              .map((p: Player, i: number) => ({
+                nickname: p.nickname,
+                score: p.score,
+                rank: i + 1,
+              }))
+            setFinalScores(sortedPlayers)
+            setPhase('finished')
+          }
+        })
+        .setOnQuestionChange(async (questionIndex: number) => {
+          console.log('Question changed to:', questionIndex)
+          if (questionIndex !== lastQuestionIndexRef.current) {
+            lastQuestionIndexRef.current = questionIndex
+            await fetchCurrentQuestion(questionIndex, questions)
+          }
+        })
+        .setOnPlayersChange((newPlayers) => {
+          setPlayers(newPlayers)
+          // Update own score
+          const me = newPlayers.find(p => p.id === playerData.id)
+          if (me) {
+            setPlayer(prev => prev ? { ...prev, score: me.score } : null)
+          }
+        })
+      poller.start(1500) // Poll every 1.5 seconds for responsiveness
+      pollerRef.current = poller
+
+      // Helper to fetch and set current question
+      async function fetchCurrentQuestion(index: number, allQuestions: Question[]) {
+        if (index >= 0 && index < allQuestions.length) {
+          const q = allQuestions[index]
+          const { correct_answer, ...questionWithoutAnswer } = q
+          setCurrentQuestion(questionWithoutAnswer)
+          setQuestionNumber(index + 1)
+          setQuestionStartTime(Date.now())
+          setSelectedAnswer(null)
+          setCorrectAnswer(null)
+          setPhase('question')
+        }
+      }
+
+      // Also try realtime (for faster updates when it works)
       const quizChannel = createQuizChannel(sessionCode)
 
       quizChannel
@@ -101,9 +166,7 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
         // Broadcast that we joined
         await quizChannel.broadcastPlayerJoined({ player: playerData })
       } catch (realtimeErr) {
-        console.error('Realtime subscription failed:', realtimeErr)
-        // Continue anyway - the player is already in the database
-        // They just won't get real-time updates
+        console.error('Realtime subscription failed, using polling:', realtimeErr)
         setChannel(quizChannel)
       }
 
@@ -113,7 +176,7 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
       setError(err instanceof Error ? err.message : 'Failed to join')
       throw err
     }
-  }, [sessionCode])
+  }, [sessionCode, phase])
 
   // Submit answer
   const handleAnswer = useCallback(async (answer: string) => {
@@ -157,6 +220,7 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
   useEffect(() => {
     return () => {
       channel?.unsubscribe()
+      pollerRef.current?.stop()
     }
   }, [channel])
 
