@@ -26,11 +26,18 @@ export class QuizChannel {
   // Subscribe to the channel
   async subscribe(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.channel.subscribe((status) => {
+      this.channel.subscribe((status, err) => {
+        console.log('Realtime channel status:', status, err)
         if (status === 'SUBSCRIBED') {
+          console.log('Successfully subscribed to channel:', this.sessionCode)
           resolve()
         } else if (status === 'CHANNEL_ERROR') {
-          reject(new Error('Failed to subscribe to channel'))
+          console.error('Channel error:', err)
+          reject(new Error(`Failed to subscribe to channel: ${err?.message || 'Unknown error'}`))
+        } else if (status === 'TIMED_OUT') {
+          reject(new Error('Channel subscription timed out'))
+        } else if (status === 'CLOSED') {
+          console.log('Channel closed')
         }
       })
     })
