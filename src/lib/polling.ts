@@ -79,8 +79,8 @@ export class SessionPoller {
         this.onStatusChange?.(session)
       }
 
-      // Check for question changes
-      if (session.current_question !== this.lastQuestionIndex) {
+      // Check for question changes (only when game is in progress)
+      if (session.status === 'in_progress' && session.current_question !== this.lastQuestionIndex) {
         this.lastQuestionIndex = session.current_question
         this.onQuestionChange?.(session.current_question)
       }

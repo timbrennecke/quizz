@@ -31,8 +31,10 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
   const [channel, setChannel] = useState<QuizChannel | null>(null)
   const [error, setError] = useState('')
   const [finalScores, setFinalScores] = useState<{ nickname: string; score: number; rank: number }[]>([])
+  const [allQuestions, setAllQuestions] = useState<Question[]>([])
   const pollerRef = useRef<SessionPoller | null>(null)
   const lastQuestionIndexRef = useRef<number>(-1)
+  const phaseRef = useRef<GamePhase>('join')
 
   // Join the game
   const handleJoin = useCallback(async (nickname: string) => {
@@ -54,18 +56,30 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
       // Fetch session to get questions
       const sessionRes = await fetch(`/api/sessions/${sessionCode}`)
       const sessionData = await sessionRes.json()
-      const questions = sessionData.quiz?.questions || []
+      const questions: Question[] = sessionData.quiz?.questions || []
+      setAllQuestions(questions)
       setTotalQuestions(questions.length)
 
       // Start polling for game state changes
       const poller = createSessionPoller(sessionCode)
       poller
         .setOnStatusChange(async (session: GameSession) => {
-          console.log('Session status changed:', session.status)
-          if (session.status === 'in_progress' && phase === 'lobby') {
+          console.log('Session status changed:', session.status, 'current phase:', phaseRef.current)
+          if (session.status === 'in_progress' && phaseRef.current === 'lobby') {
             // Game started - fetch current question
-            await fetchCurrentQuestion(session.current_question, questions)
-          } else if (session.status === 'finished') {
+            if (session.current_question >= 0 && session.current_question < questions.length) {
+              const q = questions[session.current_question]
+              const { correct_answer, ...questionWithoutAnswer } = q
+              setCurrentQuestion(questionWithoutAnswer)
+              setQuestionNumber(session.current_question + 1)
+              setQuestionStartTime(Date.now())
+              setSelectedAnswer(null)
+              setCorrectAnswer(null)
+              lastQuestionIndexRef.current = session.current_question
+              setPhase('question')
+              phaseRef.current = 'question'
+            }
+          } else if (session.status === 'finished' && phaseRef.current !== 'finished') {
             // Fetch final scores
             const finalRes = await fetch(`/api/sessions/${sessionCode}`)
             const finalData = await finalRes.json()
@@ -78,13 +92,22 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
               }))
             setFinalScores(sortedPlayers)
             setPhase('finished')
+            phaseRef.current = 'finished'
           }
         })
         .setOnQuestionChange(async (questionIndex: number) => {
-          console.log('Question changed to:', questionIndex)
-          if (questionIndex !== lastQuestionIndexRef.current) {
+          console.log('Question changed to:', questionIndex, 'last:', lastQuestionIndexRef.current)
+          if (questionIndex !== lastQuestionIndexRef.current && questionIndex >= 0 && questionIndex < questions.length) {
             lastQuestionIndexRef.current = questionIndex
-            await fetchCurrentQuestion(questionIndex, questions)
+            const q = questions[questionIndex]
+            const { correct_answer, ...questionWithoutAnswer } = q
+            setCurrentQuestion(questionWithoutAnswer)
+            setQuestionNumber(questionIndex + 1)
+            setQuestionStartTime(Date.now())
+            setSelectedAnswer(null)
+            setCorrectAnswer(null)
+            setPhase('question')
+            phaseRef.current = 'question'
           }
         })
         .setOnPlayersChange((newPlayers) => {
@@ -97,20 +120,6 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
         })
       poller.start(1500) // Poll every 1.5 seconds for responsiveness
       pollerRef.current = poller
-
-      // Helper to fetch and set current question
-      async function fetchCurrentQuestion(index: number, allQuestions: Question[]) {
-        if (index >= 0 && index < allQuestions.length) {
-          const q = allQuestions[index]
-          const { correct_answer, ...questionWithoutAnswer } = q
-          setCurrentQuestion(questionWithoutAnswer)
-          setQuestionNumber(index + 1)
-          setQuestionStartTime(Date.now())
-          setSelectedAnswer(null)
-          setCorrectAnswer(null)
-          setPhase('question')
-        }
-      }
 
       // Also try realtime (for faster updates when it works)
       const quizChannel = createQuizChannel(sessionCode)
@@ -171,12 +180,13 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
       }
 
       setPhase('lobby')
+      phaseRef.current = 'lobby'
     } catch (err) {
       console.error('Join error:', err)
       setError(err instanceof Error ? err.message : 'Failed to join')
       throw err
     }
-  }, [sessionCode, phase])
+  }, [sessionCode])
 
   // Submit answer
   const handleAnswer = useCallback(async (answer: string) => {
