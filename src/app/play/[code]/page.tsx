@@ -238,11 +238,20 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
     }
   }, [player, currentQuestion, selectedAnswer, questionStartTime, sessionCode, channel])
 
-  // Cleanup on unmount
+  // Cleanup on unmount only
   useEffect(() => {
     return () => {
-      channel?.unsubscribe()
+      console.log('Component unmounting, cleaning up...')
       pollerRef.current?.stop()
+    }
+  }, []) // Empty dependency - only run on unmount
+  
+  // Cleanup channel when it changes
+  useEffect(() => {
+    return () => {
+      if (channel) {
+        channel.unsubscribe()
+      }
     }
   }, [channel])
 
