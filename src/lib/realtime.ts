@@ -40,8 +40,8 @@ export class QuizChannel {
           console.error('Channel error details:', {
             error: err,
             message: err?.message,
-            code: (err as Record<string, unknown>)?.code,
-            details: (err as Record<string, unknown>)?.details,
+            code: (err as unknown as Record<string, unknown>)?.code,
+            details: (err as unknown as Record<string, unknown>)?.details,
           })
           // Don't reject - try to continue anyway
           console.warn('Continuing despite channel error...')
