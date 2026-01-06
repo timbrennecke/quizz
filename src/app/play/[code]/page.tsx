@@ -94,14 +94,22 @@ export default function PlayerPage({ params }: { params: Promise<{ code: string 
           setPhase('finished')
         })
 
-      await quizChannel.subscribe()
-      setChannel(quizChannel)
+      try {
+        await quizChannel.subscribe()
+        setChannel(quizChannel)
 
-      // Broadcast that we joined
-      await quizChannel.broadcastPlayerJoined({ player: playerData })
+        // Broadcast that we joined
+        await quizChannel.broadcastPlayerJoined({ player: playerData })
+      } catch (realtimeErr) {
+        console.error('Realtime subscription failed:', realtimeErr)
+        // Continue anyway - the player is already in the database
+        // They just won't get real-time updates
+        setChannel(quizChannel)
+      }
 
       setPhase('lobby')
     } catch (err) {
+      console.error('Join error:', err)
       setError(err instanceof Error ? err.message : 'Failed to join')
       throw err
     }
